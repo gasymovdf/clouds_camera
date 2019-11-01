@@ -1,16 +1,17 @@
+import os
+import numpy as np
+import pandas as pd
+from PIL import Image
+from astropy import wcs
 from astropy.io import fits
 import matplotlib.pyplot as plt
-import pandas as pd
-from astropy.coordinates import SkyCoord
 from astropy.table import Column
 from astropy.table import QTable
 from matplotlib.colors import LogNorm
 from photutils import CircularAperture
-from astropy.stats import sigma_clipped_stats
-from astropy import wcs
+from astropy.coordinates import SkyCoord
 from astropy.nddata.utils import Cutout2D
-import os
-import numpy as np
+from astropy.stats import sigma_clipped_stats
 
 
 def astrometry(file, RAastro=180., DECastro=0., scale_low=0.1, scale_high=180., tweak_order=2):
@@ -29,6 +30,15 @@ def rename(BSCatalogue, names):
 
 def photometry(STAR_data):
     return np.sum(STAR_data)
+
+def jpg2_fits(file):
+    image = Image.open(file)
+    xsize, ysize = image.size
+    rgb = image.split()
+    data_r = np.array(rgb[0].getdata()).reshape(ysize, xsize)
+    data_g = np.array(rgb[1].getdata()).reshape(ysize, xsize)
+    data_b = np.array(rgb[2].getdata()).reshape(ysize, xsize)
+    return data_r, data_g, data_b
 
 
 def BSC_open(file):
@@ -112,10 +122,14 @@ def make_map(BSCatalogue, data, outfile, CIRCLE_RADIUS=20., lw=1., OBS_TH_value=
 
 
 def processed(file):
-    fits_file = file
-    hdulist = fits.open(fits_file)
-    data = hdulist[0].data[1]
-    header = hdulist[0].header[1]
+    if '.jpg' in file:
+        red, green, blue = jpg2_fits(file) 
+        data = green
+    else:
+        fits_file = file
+        hdulist = fits.open(fits_file)
+        data = hdulist[0].data[1]
+    
     mean, median, std = sigma_clipped_stats(data, sigma=5.0)
     STAR_size = 15
 
@@ -128,5 +142,5 @@ def processed(file):
     make_map(BSCatalogue, data, '../processed/result.jpg', CIRCLE_RADIUS=STAR_size, lw=2., OBS_TH_value=1.2)
 
 
-file = '../data/cas_cus.fits'
+file = '../data/Cas_cut.jpg'
 processed(file)
