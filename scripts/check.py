@@ -1,22 +1,50 @@
 import os
+import glob
 import numpy as np
 import pandas as pd
 from PIL import Image
 from astropy import wcs
+import astropy.units as u
 from astropy.io import fits
+from astropy.time import Time
 import matplotlib.pyplot as plt
 from astropy.table import Column
 from astropy.table import QTable
 from matplotlib.colors import LogNorm
 from photutils import CircularAperture
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, AltAz
 from astropy.nddata.utils import Cutout2D
 from astropy.stats import sigma_clipped_stats
+from astropy.coordinates import EarthLocation
 
 
-def astrometry(file, RAastro=180., DECastro=0., scale_low=0.1, scale_high=180., tweak_order=2):
+def astrometry(file, location, time, RAastro=180., DECastro=0., scale_low=0.1, scale_high=180., tweak_order=2):
     os.system('/usr/local/astrometry/bin/solve-field  --no-background-subtraction --resort --downsample 2 --no-verify --scale-low ' + str(scale_low) +
-              ' --scale-high ' + str(scale_high) + ' --overwrite --ra ' + str(RAastro) + ' --dec ' + str(DECastro) + ' --tweak-order ' + str(tweak_order) + ' ' + file)
+              ' --scale-high ' + str(scale_high) + ' --overwrite --tweak-order ' + str(tweak_order) + ' ' + file) # ' --ra ' + str(RAastro) + ' --dec ' + str(DECastro) + 
+
+    wcs_file = format2_wcs(file)
+    with fits.open(wcs_file, mode='update') as hdu:
+            CR_altaz(hdu, location, time)
+            hdu.flush() 
+
+
+def format2_wcs(file):
+    k = 0
+    for i in range(len(file)-1, 0, -1):
+        if file[i]=='.':
+            k = i
+            break
+    return file.replace(file[k:], ".wcs")
+
+
+def CR_altaz(hdu, location, time):
+    header = hdu[0].header
+    ra, dec = header['CRVAL1'], header['CRVAL2']
+    CR = SkyCoord(ra*u.deg, dec*u.deg, frame='icrs') 
+    altaz_CR = CR.transform_to(AltAz(obstime=time, location=location))
+    header['CRVAL1_AZ'] = altaz_CR.az.degree
+    header['CRVAL2_ALT'] = altaz_CR.alt.degree
+
 
 def drop(BSCatalogue, nums):
     for i in nums:
@@ -39,6 +67,19 @@ def jpg2_fits(file):
     data_g = np.array(rgb[1].getdata()).reshape(ysize, xsize)
     data_b = np.array(rgb[2].getdata()).reshape(ysize, xsize)
     return data_r, data_g, data_b
+
+
+def create_wcs(grid, location, time):
+    for file in grid:
+        with fits.open(file, mode='update') as hdu:
+            header = hdu[0].header
+            az, alt = header['CRVAL1_AZ'], header['CRVAL2_ALT']
+            print(header['CRVAL1'], header['CRVAL2'])
+            CR = SkyCoord(az*u.deg, alt*u.deg, obstime=time, location=location, frame = 'altaz')       
+            header['CRVAL1'] = CR.transform_to('icrs').ra.degree
+            header['CRVAL2'] = CR.transform_to('icrs').dec.degree
+            print(header['CRVAL1'], header['CRVAL2'])
+            hdu.flush() 
 
 
 def BSC_open(file):
@@ -71,6 +112,35 @@ def BSC_xy(BSCatalogue, wcs):
             BSCatalogue[i]['ra'], BSCatalogue[i]['dec'], 0)
         BSCatalogue[i]['x'] = round(BSCatalogue[i]['x'])
         BSCatalogue[i]['y'] = round(BSCatalogue[i]['y'])
+    return BSCatalogue
+
+
+def BSC_altaz(BSCatalogue, location, time):
+    BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='az')
+    BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='alt')
+    for i in range(len(BSCatalogue)):
+        if BSCatalogue[i]['Observ_flux']:
+            ra, dec = BSCatalogue[i]['ra'], BSCatalogue[i]['dec']
+            star = SkyCoord(ra*u.deg, dec*u.deg, frame='icrs') 
+            altaz_star = star.transform_to(AltAz(obstime=time, location=location))
+            BSCatalogue[i]['az'] = altaz_star.az.degree
+            BSCatalogue[i]['alt'] = altaz_star.alt.degree
+    return BSCatalogue
+
+
+def BSC_extinction(BSCatalogue):
+    R = 6400
+    H = 8
+    A_V_zenit = 0.2
+
+    BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='vmag_atmosph')
+    for i in range(len(BSCatalogue)):
+        if BSCatalogue[i]['Observ_flux']:
+            sin = np.sin(BSCatalogue[i]['alt'] * np.pi/180.)
+            D = 4*R**2 * sin**2 + 4*(2*R*H + H**2)
+            L = (-2 * R * sin + np.sqrt(D))/2
+            ext = A_V_zenit * L/H
+            BSCatalogue[i]['vmag_atmosph'] = BSCatalogue[i]['vmag'] + ext
     return BSCatalogue
 
 
@@ -129,18 +199,29 @@ def processed(file):
         fits_file = file
         hdulist = fits.open(fits_file)
         data = hdulist[0].data[1]
-    
-    mean, median, std = sigma_clipped_stats(data, sigma=5.0)
     STAR_size = 15
+    KGO = EarthLocation(lat='43d44m46s', lon='42d40m03s', height=2112*u.m)
+    time = Time('2019-10-15T00:00:00.1', format='isot', scale='utc')
 
-    w = wcs.WCS('../data/new-image.wcs')
+    grid = glob.glob('../data/*.wcs')
+    if len(grid) == 0:
+        astrometry(file, KGO, time, RAastro=330., DECastro=50., scale_low=40., scale_high=150., tweak_order=2)
+        wcs_file = format2_wcs(file)
+        w = wcs.WCS(wcs_file)
+    else:
+        create_wcs(grid, KGO, time)
+        w = wcs.WCS(grid[0])
+
     BSC_file = "../data/BSC_clean.txt"
     BSCatalogue = BSC_open(BSC_file)
     BSCatalogue = BSC_xy(BSCatalogue, w)
     BSCatalogue, FLUX_0m = BSC_observ_flux(BSCatalogue, data, STAR=STAR_size, CRIT_m=5.)
+
+    BSCatalogue = BSC_altaz(BSCatalogue, KGO, time)
+    BSCatalogue = BSC_extinction(BSCatalogue)
     BSCatalogue = BSC_theory_flux(BSCatalogue, FLUX_0m=FLUX_0m)
     make_map(BSCatalogue, data, '../processed/result.jpg', CIRCLE_RADIUS=STAR_size, lw=2., OBS_TH_value=1.2)
 
 
-file = '../data/Cas_cut.jpg'
+file = '../data/Cas.jpg'
 processed(file)
