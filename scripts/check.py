@@ -25,8 +25,8 @@ from astropy.coordinates import EarthLocation
 def astrometry(file, location, time, RAastro=180., DECastro=0., scale_low=0.1, scale_high=180., tweak_order=2):
     os.system('/usr/local/astrometry/bin/solve-field  --no-background-subtraction --resort --downsample 2 --no-verify --scale-low ' + str(scale_low) +
               ' --scale-high ' + str(scale_high) + ' --overwrite --tweak-order ' + str(tweak_order) + ' ' + file)  # ' --ra ' + str(RAastro) + ' --dec ' + str(DECastro) +
-
-    wcs_file = format2_wcs(file)
+    
+    wcs_file = file.replace(file.split('.')[-1], 'wcs')
     with fits.open(wcs_file, mode='update') as hdu:
         CR_altaz(hdu, location, time)
         hdu.flush()
@@ -39,7 +39,7 @@ def get_data(file):
     else:
         fits_file = file
         hdulist = fits.open(fits_file)
-        data = hdulist[0].data[1]
+        data = hdulist[0].data
     return data
 
 
@@ -303,14 +303,14 @@ def processed(file):  # Основная процедура программы
              lw=2., OBS_TH_value=OBS_TH_value)  # Получение итоговой картинки
 
 
-file = '../data/Cas.jpg'  # Расположение файла
+file = '../data/150frames2.fits'  # Расположение файла
 BSC_file = '../data/BSC_clean.txt'  # Расположение каталога
 outfile = '../processed/result.jpg'  # Расположение output картинки
 
 lat = '43d44m46s'  # Широта места наблюдения (в таком формате)
 lon = '42d40m03s'  # Долгота места наблюдения (в таком формате)
 height = 2112  # Выоста места наблюдения (метры)
-TIME = '2019-10-15T00:00:00.1'  # Время UTC момента съёмки
+TIME = '2019-12-08T00:56:32.946308'  # Время UTC момента съёмки
 
 SNR = 5  # sigma для фильтра фона неба (pix)
 box_size = 20  # Размер box для фильтра фона неба (pix)
