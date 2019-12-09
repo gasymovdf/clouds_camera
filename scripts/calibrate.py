@@ -24,6 +24,11 @@ from astropy.coordinates import SkyCoord, AltAz
 from astropy.nddata.utils import Cutout2D
 from astropy.stats import sigma_clipped_stats
 from astropy.coordinates import EarthLocation
+from astropy.utils import iers
+import warnings
+from astropy.utils.exceptions import AstropyWarning
+iers.conf.auto_download = False
+warnings.simplefilter('ignore', AstropyWarning)
 
 def drawLine2P(x,y,xlims,ax):
     xrange = np.arange(xlims[0],xlims[1],0.1)
@@ -31,11 +36,34 @@ def drawLine2P(x,y,xlims,ax):
     k, b = np.linalg.lstsq(A, y)[0]
     ax.plot(xrange, k*xrange + b, '--k', lw=0.3)
 
-def residual(p, x, y, data=None):
+def line_k(x1, y1, x2, y2):
+    return (y1 - y2), (x2 - x1), (x1*y2 - x2*y1)
+
+def r(x1, y1, x2, y2):
+    return ((x1 - x2)**2 + (y1 - y2)**2)**0.5
+
+def xy2pol(x, y):
+    rho = np.sqrt(x**2 + y**2)
+    phi = np.arctan2(y, x)
+    return(rho, phi)
+
+def pol2xy(rho, phi):
+    x = rho * np.cos(phi)
+    y = rho * np.sin(phi)
+    return (x, y)
+
+def residual(p, x, y, data=None, x0=1000, y0=500):
     v = p.valuesdict()
-    if data is not None:
-        return v['a1'] + v['a2']*x + v['a3']*y + v['a4']*x**2 + v['a5']*x*y + v['a6']*y**2 - data
-    return v['a1'] + v['a2']*x + v['a3']*y + v['a4']*x**2 + v['a5']*x*y + v['a6']*y**2
+    R, phi = xy2pol(x-x0, y-y0)
+    R_obs = v['a']*R**3 + v['b']*R**2 + v['c']*R + v['d']
+    xt, yt = pol2xy(R_obs, phi)
+    if data is None:
+        return xt+x0, yt+y0
+
+    data_x = data[0]-x0    
+    data_y = data[1]-y0    
+    R_data, phi_data = xy2pol(data_x, data_y)
+    return R_obs - R_data
 
 def astrometry(file, location, time, RAastro=180., DECastro=0., scale_low=0.1, scale_high=180., tweak_order=2):
     os.system('/usr/local/astrometry/bin/solve-field  --no-background-subtraction --resort --downsample 2 --no-verify --scale-low ' + str(scale_low) +
@@ -96,7 +124,7 @@ def xy_obs(BSCatalogue, data, star_size=7):
         ax.imshow(data, cmap='Greys', origin='lower')
         circle = plt.Circle((x, y), 300, color='red', lw=1, fill=False)
         ax.add_artist(circle)
-        drawLine2P([a/2, x], [b/2, y],[0, 1620], ax)
+        drawLine2P([a/2, x], [b/2, y],[0, 3000], ax)
         plt.xlim(0, a)
         plt.ylim(0, b)
         plt.show()
@@ -110,40 +138,58 @@ def xy_obs(BSCatalogue, data, star_size=7):
     return BSCatalogue
 
 
-def save_params(header, p_x, p_y):
-    v = p_x.params.valuesdict()
+def save_params(header, p_r, x0=1000, y0=500):
+    v = p_r.params.valuesdict()
     for i in v:
         header[i] = v[i]
-    v = p_y.params.valuesdict()
-    for i in v:
-        header[i.replace('a', 'b')] = v[i]
+    header['X0'] = x0
+    header['Y0'] = y0
+
+def observe_center(data, x, y, data_x, data_y, min_rad=5, min_norm_resid=500):
+    a, b = len(data[0]), len(data)
+    xi, yi = [], []
+    for i in range(len(x)):
+        for j in range(i+1, len(x)):
+            if r(x[i], y[i], data_x[i], data_y[i]) > min_rad and\
+               r(x[j], y[j], data_x[j], data_y[j]) > min_rad:
+                a1, b1, c1 = line_k(x[i], y[i], data_x[i], data_y[i])
+                a2, b2, c2 = line_k(x[j], y[j], data_x[j], data_y[j])
+                if a1/b1 != a2/b2:
+                    x_interc = (b1/b2 * c2 - c1)/(a1 - b1/b2 * a2)
+                    y_interc = (a1/a2 * c2 - c1)/(b1 - a1/a2 * b2)
+                    if r(x_interc, y_interc, a/2, b/2) < min_norm_resid:
+                        xi.append(x_interc)
+                        yi.append(y_interc)
+
+    if len(xi) > 0:
+        xi = np.array(xi)
+        yi = np.array(yi)
+        return np.median(xi), np.median(yi)
+    return a/2, b/2
 
 
-def find_dist(BSCatalogue, wcs_file):
-    p_x = lmfit.Parameters()
-    p_y = lmfit.Parameters()
-    p_x.add_many(('a1', 1.), ('a2', 1.), ('a3', 1.), ('a4', 1.), ('a5', 1.), ('a6', 1.))
-    p_y.add_many(('a1', 1.), ('a2', 1.), ('a3', 1.), ('a4', 1.), ('a5', 1.), ('a6', 1.))
+def find_dist(BSCatalogue, data, wcs_file):
+    p_r = lmfit.Parameters()
+    p_r.add_many(('a', 1.), ('b', 1.), ('c', 1.), ('d', 1.))
     x = np.array([BSCatalogue['x']])[0]
     y = np.array([BSCatalogue['y']])[0]
     data_x = np.array([BSCatalogue['x_obs']])[0]
     data_y = np.array([BSCatalogue['y_obs']])[0]
+    x0, y0 = observe_center(data, x, y, data_x, data_y)
 
-    mi_x = lmfit.minimize(residual, params=p_x, nan_policy='omit', args=(x, y, data_x))
-    mi_y = lmfit.minimize(residual, params=p_y, nan_policy='omit', args=(y, x, data_y))
-    # lmfit.printfuncs.report_fit(mi_x.params, min_correl=0.5)
+    mi_r = lmfit.minimize(residual, params=p_r, nan_policy='omit', args=(x, y, [data_x, data_y], x0, y0))
+    lmfit.printfuncs.report_fit(mi_r.params, min_correl=0.5)
 
-    plt.plot(x, residual(mi_x.params, x, y, data_x), '*')
-    plt.title('residual Ox')
-    plt.savefig('residual_x.jpg')
+    plt.plot(r(data_x, data_y, x0, y0), residual(mi_r.params, x, y, data=[data_x, data_y], x0=x0, y0=y0), '*')
+    plt.title('residual (r_th - r_obs)')
+    plt.xlabel('r_obs')
+    plt.ylabel('r_th - r_obs')
+    plt.savefig('residual.jpg')
     plt.close()
-    plt.plot(y, residual(mi_y.params, y, x, data_y), '*')
-    plt.title('residual Oy')
-    plt.savefig('residual_y.jpg')
     
     with fits.open(wcs_file, mode='update') as hdul:
         header = hdul[0].header
-        save_params(header, mi_x, mi_y)
+        save_params(header, mi_r, x0, y0)
         hdul.flush()   
 
 
@@ -155,8 +201,8 @@ def find_zeropoint(BSCatalogue, data, wcs_file, STAR_PHOT=5):
         x, y = i['x_obs'], i['y_obs']
         m = i['vmag_atmosph']
         STAR_data = Cutout2D(data, (x, y), (2*STAR_PHOT + 1, 2*STAR_PHOT + 1)).data
-        plt.imshow(STAR_data)
-        plt.show()
+        # plt.imshow(STAR_data)
+        # plt.show()
         i['Observ_flux'] = check.photometry(STAR_data)
         FLUX_0m.append(i['Observ_flux'] * (2.512**m))
 
@@ -180,7 +226,7 @@ def process(data, file, BSC_file, loc, time, scl_l=0.1, scl_h=180., tw_o=2, CRIT
     BSCatalogue = xy_th(BSCatalogue, w, data)
     BSCatalogue = check.Stars_on_image(BSCatalogue, data, CRIT_m=CRIT_m)
     BSCatalogue = xy_obs(BSCatalogue, data, star_size=8)
-    find_dist(BSCatalogue, wcs_file)
+    find_dist(BSCatalogue, data, wcs_file)
 
     BSCatalogue = check.BSC_altaz(BSCatalogue, loc, time)
     BSCatalogue = check.BSC_extinction(BSCatalogue, ObsAlt=height, A_V_zenith=A_V_zenith, Hatm=Hatm)
