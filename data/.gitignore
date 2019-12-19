@@ -1,1 +1,11 @@
-*
+*.fits
+*.axy
+*.corr
+*.match
+*.new
+*.rdls
+*.solved
+*.wcs
+*.xyls
+*.png
+*.jpg

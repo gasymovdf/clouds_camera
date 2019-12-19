@@ -1,9 +1,11 @@
+#!/usr/bin/python3
+# -*- coding: UTF-8 -*-
 import check
 import glob
 import time
 
 f = open('time.txt', 'w')
-files = glob.glob('../data/*.fits*') # ['../data/150frames2.fits', '../data/150frames3_clouds.fits', '../data/150frames1.fits', '../data/15frames2.fits', '../data/150frames3.fits', '../data/150frames4_clouds.fits', '../data/15frames1.fits']
+files = glob.glob('../data/*.fits*')
 for i in range(len(files)):
     start_time = time.time()
     outfile = '../processed/result_' + str(i) + '.jpg'  # Расположение output картинки
