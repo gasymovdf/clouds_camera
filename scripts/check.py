@@ -32,6 +32,10 @@ warnings.simplefilter('ignore', AstropyWarning)
 
 
 def get_data(file, time=None):
+    '''
+    Получение данных с изображения (jpg или FITS). 
+    Для FITS файла проводится нормировка потока, если есть FNUMBER и изменяется момент съёмки если есть TIME.
+    '''
     if '.jpg' in file:
         red, green, blue = jpg2_fits(file)
         data = green
@@ -52,10 +56,15 @@ def get_data(file, time=None):
 
 
 def bkg(data, SNR=5, box_size=30, filter_size=3):
+    '''
+    Применение медианного фильтра к изображению.
+    '''
     sigma_clip = SigmaClip(sigma=SNR)
     bkg_estimator = MedianBackground()
     bkg = Background2D(data, (box_size, box_size), filter_size=(filter_size, filter_size),
                        sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+    #hdu = fits.PrimaryHDU()
+    fits.writeto('background.fits', bkg.background, overwrite=True)
     return data - bkg.background
 
 
@@ -71,6 +80,9 @@ def jpg2_fits(file):
 
 
 def create_wcs(file, location, time):
+    '''
+    Изменение координат (RA, DEC) позиционного пикселя на момент съёмки time.
+    '''
     with fits.open(file, mode='update') as hdu:
         header = hdu[0].header
         az, alt = header['CRVAL1_AZ'], header['CRVAL2_ALT']
@@ -78,21 +90,21 @@ def create_wcs(file, location, time):
                       location=location, frame='altaz')
         header['CRVAL1'] = CR.transform_to('icrs').ra.degree
         header['CRVAL2'] = CR.transform_to('icrs').dec.degree
-        print(header['CRVAL1'], header['CRVAL2'])
         hdu.flush()
 
 
-def Calculate_aperture(BSCatalogue, min_rad=5, increase_per_100px=5):
-    p = np.array(BSCatalogue['Distance_center'])
-    radii = min_rad + increase_per_100px * p/100
-    return radii
-
-
 def photometry(STAR_data):
+    '''
+    Подобие фотометрии звезды, из-за плохих изображений звёзд находится просто сумма квадратика данных звезды. 
+    '''
     return np.sum(STAR_data)
 
 
 def BSC_open(file):
+    '''
+    Открытие каталога Bright Stars. Поправка некоторых ошибок при чтении каталога,
+    пересчёт (RA, DEC) в десятичный формат.
+    '''
     BSCatalogue = pd.read_csv(file, sep='|')
     BSCatalogue = BSCatalogue.drop(BSCatalogue.columns[0], axis=1)
     BSCatalogue = BSCatalogue.drop(BSCatalogue.columns[-1], axis=1)
@@ -116,7 +128,11 @@ def BSC_open(file):
     return BSCatalogue
 
 
-def BSC_xy(BSCatalogue, wcs_file, data, min_res=5):
+def BSC_xy(BSCatalogue, wcs_file, data, edge=400, min_res=5):
+    '''
+    Нахождение координат (x, y) в сетке снимка. 
+    Используется слабый фильтр, чтобы убрать точно неправильные координаты.
+    '''
     BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='x')
     BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='y')
     a, b = len(data[0]), len(data)
@@ -126,34 +142,40 @@ def BSC_xy(BSCatalogue, wcs_file, data, min_res=5):
 
     for i in BSCatalogue:
         xt, yt = w.wcs_world2pix(i['ra'], i['dec'], 0)
-        if np.isnan(xt) or np.isnan(yt) or (xt <= 0 or xt >= a) or (yt <= 0 or yt >= b):
+        if np.isnan(xt) or np.isnan(yt) or (xt <= -edge or xt >= a+edge) or (yt <= -edge or yt >= b+edge):
             continue
-        x0, y0 = header['X0'], header['Y0']
-        p = lmfit.Parameters()
-        p.add_many(('a', header['A']), 
-                   ('b', header['B']),
-                   ('c', header['C']),
-                   ('d', header['D']))
-        i['x'], i['y'] = clt.residual(p, xt, yt, x0=x0, y0=y0)    
+        i['x'], i['y'] = clt.real_xy(xt, yt, header)
         # STAR = Cutout2D(data, (i['x'], i['y']), (2*min_res + 1, 2*min_res + 1)).data
         # i['y'], i['x'] = np.unravel_index(np.argmax(STAR), STAR.shape)
     return BSCatalogue
 
 
-def Stars_on_image(BSCatalogue, data_obs, CRIT_m=5.):
+def Stars_on_image(BSCatalogue, data_obs, wcs=None, CRIT_m=5.):
+    '''
+    Фильтр звёзд, проходят только с (x, y) внутри изображения и m меньше заданной в главной части программы.
+    Непрошедшие звёзды удаляются из каталога.
+    '''
     a, b = len(data_obs[0]), len(data_obs)
     i = 0
     while i < len(BSCatalogue):
-        x, y = BSCatalogue[i]['x'], BSCatalogue[i]['y'] 
+        x, y = BSCatalogue[i]['x'], BSCatalogue[i]['y']
         m = BSCatalogue[i]['vmag']
         if math.isnan(x) or math.isnan(y) or (x <= 0 or x >= a) or (y <= 0 or y >= b) or (m > CRIT_m):
             BSCatalogue.remove_row(i)
-            i-=1
-        i+=1
+            i -= 1
+        else:
+            if wcs is not None and BSCatalogue[i]['ch'] == 1:
+                xt, yt = wcs.wcs_world2pix(
+                    BSCatalogue[i]['ra'], BSCatalogue[i]['dec'], 0)
+                BSCatalogue[i]['x'], BSCatalogue[i]['y'] = xt, yt
+        i += 1
     return BSCatalogue
 
 
 def BSC_altaz(BSCatalogue, location, time):
+    '''
+    Получение горизонтальныйх (Alt, Az) координат звёзд.
+    '''
     BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='az')
     BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='alt')
     for i in BSCatalogue:
@@ -166,7 +188,11 @@ def BSC_altaz(BSCatalogue, location, time):
 
 
 def BSC_extinction(BSCatalogue, ObsAlt=0, A_V_zenith=0.2, Hatm=8):
-    BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='vmag_atmosph')
+    '''
+    Учёт поглощения в модели атмосферы в виде сферического слоя над Землёй. 
+    '''
+    BSCatalogue.add_column(
+        Column(np.zeros(len(BSCatalogue))), name='vmag_atmosph')
     for i in BSCatalogue:
         zenith_angle = 90 - i['alt']
         airmass = pyasl.airmassSpherical(zenith_angle, ObsAlt, yatm=Hatm)
@@ -176,40 +202,66 @@ def BSC_extinction(BSCatalogue, ObsAlt=0, A_V_zenith=0.2, Hatm=8):
 
 
 def BSC_observ_flux(BSCatalogue, data, STAR_PHOT=5.):
-    BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='Observ_flux')
-
-    for i in BSCatalogue:
+    '''
+    Получение видимого потока от звёзд. Пересвеченные звёзды удаляются из каталога.
+    '''
+    BSCatalogue.add_column(
+        Column(np.zeros(len(BSCatalogue))), name='Observ_flux')
+    j = 0
+    while j < len(BSCatalogue):
+        i = BSCatalogue[j]
         x, y = i['x'], i['y']
-        STAR_data = Cutout2D(data, (x, y), (2*STAR_PHOT + 1, 2*STAR_PHOT + 1)).data
-        # plt.imshow(STAR_data)
-        # plt.show()
+        STAR_data = Cutout2D(
+            data, (x, y), (2*STAR_PHOT + 1, 2*STAR_PHOT + 1)).data
+        ma = np.max(STAR_data)
+        if ma > 200 and np.sum(STAR_data > 0.9*ma) > 12:
+            BSCatalogue.remove_row(j)
+            continue
+
         i['Observ_flux'] = photometry(STAR_data)
+        # if i['Observ_flux'] < i['Flux'] - i['sigma_Flux']*2:
+        # plt.imshow(STAR_data)
+        # plt.title('r = ' + str(((x-960)**2 + (y-540)**2)**0.5) + '; FLUX = ' + str(i['Observ_flux']))
+        # plt.show()
+        j += 1
+
     return BSCatalogue
 
 
 def BSC_theory_flux(BSCatalogue, wcs_file):
+    '''
+    Получение теоретического потока (и его погрешности) от звезды с учётом поглощения.
+    '''
     BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='Flux')
-    BSCatalogue.add_column(Column(np.zeros(len(BSCatalogue))), name='sigma_Flux')
+    BSCatalogue.add_column(
+        Column(np.zeros(len(BSCatalogue))), name='sigma_Flux')
     hdu = fits.open(wcs_file)
     header = hdu[0].header
 
     for i in BSCatalogue:
         i['Flux'] = 2.512**(-float(i['vmag_atmosph'])) * header['zeropoint']
-        i['sigma_Flux'] = 2.512**(-float(i['vmag_atmosph'])) * header['sigma_zeropoint']
+        i['sigma_Flux'] = 2.512**(-float(i['vmag_atmosph'])
+                                  ) * header['sigma_zeropoint']
     return BSCatalogue
 
 
 def make_map(BSCatalogue, file, data, outfile, lw=1.):
+    '''
+    Создание карты облачности с отметкой проходящих и непроходящих анализ звёзд.
+    Анализ: если видимый поток меньше на 2*std от теоретического потока, то мы отмечаем "облако".
+    Зелёный кружок -- звезда проходит тест, красный -- на месте звезды "облако".
+    Для получения карты прозрачности на данный момент не хватает точности измерений нуль-пункта.
+    '''
     a, b = len(data[0]), len(data)
     g, r = 0, 0
-    fig = plt.figure() # figsize=(13, 8)
+    fig = plt.figure()  # figsize=(13, 8)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.imshow(data, cmap='Greys', origin='lower', norm=LogNorm())
     # make_constellations()
 
     for i in BSCatalogue:
         x, y = i['x'], i['y']
-        if i['Observ_flux'] < i['Flux'] - i['sigma_Flux']*1.96:
+        if i['Observ_flux'] < i['Flux'] - i['sigma_Flux']*2:
             color = 'red'
             r += 1
         else:
@@ -222,7 +274,7 @@ def make_map(BSCatalogue, file, data, outfile, lw=1.):
         ax.add_artist(circle)
 
     ax.plot([], [], ' ', label='green/(red + green) = ' +
-             str(np.round(g/(r + g), 3)))
+            str(np.round(g/(r + g), 3)))
     ax.legend(loc='best')
     ax.set_xlim(0, a)
     ax.set_ylim(b, 0)
@@ -233,43 +285,37 @@ def make_map(BSCatalogue, file, data, outfile, lw=1.):
     plt.close()
 
 
-def processed(file, outfile):  # Основная процедура программы
-    data, t = get_data(file, TIME) 
+def processed(file, outfile, calibrate=True):  # Основная процедура программы
+    data, t = get_data(file, TIME)
     data = bkg(data, SNR=SNR, box_size=box_size,
-               filter_size=filter_size) 
+               filter_size=filter_size)
     loc = EarthLocation(lat=lat, lon=lon, height=height*u.m)
     time = Time(t, format='isot', scale='utc')
 
     grid = glob.glob('../data/*.wcs')
     if len(grid) == 0:  # Сетки нет
-        clt.process(data, file, BSC_file, loc, time, scl_l=scl_l, scl_h=scl_h, tw_o=tw_o, CRIT_m=calibrate_m, height=height, A_V_zenith=A_V_zenith, Hatm=Hatm)
+        clt.process(data, file, out_cntf, BSC_file, loc, time, center_size=center_size, scl_l=scl_l, scl_h=scl_h,
+                    tw_o=tw_o, edge=edge, CRIT_m=calibrate_m, height=height, A_V_zenith=A_V_zenith, Hatm=Hatm, STAR_PHOT=STAR_PHOT)
     else:
-        print("Если вы хотите откалибровать камеру, напишите 1:")
-        a = 0
-        # a = input()
-        if a == '1':
-            clt.process(data, file, BSC_file, loc, time, scl_l=scl_l, scl_h=scl_h, tw_o=tw_o, CRIT_m=calibrate_m, height=height, A_V_zenith=A_V_zenith, Hatm=Hatm)
+        if calibrate:
+            clt.process(data, file, out_cntf, BSC_file, loc, time, scl_l=scl_l, scl_h=scl_h, tw_o=tw_o,
+                        edge=edge, CRIT_m=calibrate_m, height=height, A_V_zenith=A_V_zenith, Hatm=Hatm, STAR_PHOT=STAR_PHOT)
         else:
             create_wcs(grid[0], loc, time)
     wcs_file = glob.glob('../data/*.wcs')[0]
 
     BSCatalogue = BSC_open(BSC_file)
-    BSCatalogue = BSC_xy(BSCatalogue, wcs_file, data, min_res=res_rad)
+    BSCatalogue = BSC_xy(BSCatalogue, wcs_file, data, min_res=res_rad, edge=edge)
     BSCatalogue = Stars_on_image(BSCatalogue, data, CRIT_m=max_mag)
     BSCatalogue = BSC_altaz(BSCatalogue, loc, time)
-    ascii.write(BSCatalogue, 'BSCatalogue.csv',
-                format='csv', fast_writer=False)
     BSCatalogue = BSC_extinction(BSCatalogue, ObsAlt=height, A_V_zenith=A_V_zenith, Hatm=Hatm)
 
-    BSCatalogue = BSC_observ_flux(BSCatalogue, data, STAR_PHOT=STAR_PHOT)
     BSCatalogue = BSC_theory_flux(BSCatalogue, wcs_file)
-    
-    ascii.write(BSCatalogue, 'BSCatalogue.csv',
-                format='csv', fast_writer=False)
-    data = get_data(file) 
-    make_map(BSCatalogue, file, data, outfile, lw=2.)  
+    BSCatalogue = BSC_observ_flux(BSCatalogue, data, STAR_PHOT=STAR_PHOT)
 
-
+    ascii.write(BSCatalogue, 'BSCatalogue.csv', format='csv', fast_writer=False)
+    data = get_data(file)
+    make_map(BSCatalogue, file, data, outfile, lw=2.)
 
 
 BSC_file = '../data/catalogs/BSC_clean.txt'  # Расположение каталога
@@ -279,18 +325,21 @@ lon = '42d40m03s'  # Долгота места наблюдения (в тако
 height = 2112  # Выоста места наблюдения (метры)
 TIME = '2019-09-24T17:18:23'  # Время UTC момента съёмки
 
-scl_l = 30.  # Минимальный размер снимка (deg)
+center_size = 200  # Область центра снимка "без" дисторсии для astrometry
+out_cntf = '../data/center_1.fits'  # название выходного файла с центром снимка
+scl_l = 10.  # Минимальный размер снимка (deg)
 scl_h = 100.  # Максимальный размер снимка (deg)
-tw_o = 2  # Порядок дисторсии (учитывается плохо)
-calibrate_m = 3.6 # Максимальная величина звёзд калибровки
+tw_o = 0  # Порядок дисторсии (учитывается плохо)
+calibrate_m = 3.6  # Максимальная величина звёзд калибровки
+edge = 400  # насколько теоретически далеко за границу могут "вылезать" звёзды
 
 SNR = 5  # sigma для фильтра фона неба (pix)
-box_size = 20  # Размер box для фильтра фона неба (pix)
-filter_size = 5  # Размер mesh для фильтра фона неба (pix)
+box_size = 50  # Размер box для фильтра фона неба (pix)
+filter_size = 10  # Размер mesh для фильтра фона неба (pix)
 
 res_rad = 10  # Размер кружка поиска звезды
-max_mag = 5.  # Предельная величина до которой проводится анализ
+max_mag = 5.  # Предельная величина до которой проводится анали
 
-STAR_PHOT = 6  # Размер апертуры фотометрии звезды (pix)
+STAR_PHOT = 30  # Размер апертуры фотометрии звезды (pix)
 A_V_zenith = 0.2  # Поглощение в зените
 Hatm = 8  # Высота однородной атмосферы (км)
